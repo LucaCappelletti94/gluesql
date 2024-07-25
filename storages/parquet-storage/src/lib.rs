@@ -60,7 +60,7 @@ impl ParquetStorage {
 
         let mut is_schemaless = false;
         let mut foreign_keys = Vec::new();
-        let mut primary_key: Option<Vec<String>> = None;
+        let mut primary_key: Option<Vec<usize>> = None;
         let mut unique_constraints = Vec::new();
         let mut comment = None;
         if let Some(metadata) = key_value_file_metadata {
@@ -84,7 +84,7 @@ impl ParquetStorage {
                     primary_key = Some(
                         kv.value
                             .as_ref()
-                            .map(|x| from_str::<Vec<String>>(x))
+                            .map(|x| from_str::<Vec<usize>>(x))
                             .map_storage_err(Error::StorageMsg(
                                 "No value found on metadata".to_owned(),
                             ))?
@@ -158,8 +158,7 @@ impl ParquetStorage {
         let mut rows = Vec::new();
         let mut key_counter: u64 = 0;
 
-        if fetched_schema.has_column_defs() {
-            let primary_key_indices = fetched_schema.get_primary_key_column_indices();
+        if fetched_schema.column_defs.is_some() {
             for record in row_iter {
                 let record: Row = record.map_storage_err()?;
                 let mut row = Vec::new();
@@ -169,13 +168,10 @@ impl ParquetStorage {
                     row.push(value.clone());
                 }
 
-                let generated_key = if let Some(primary_key_indices) = primary_key_indices.as_ref()
-                {
-                    gluesql_core::executor::get_primary_key_from_row(&row, primary_key_indices)?
-                } else {
+                let generated_key = fetched_schema.get_primary_key(&row).unwrap_or({
                     key_counter += 1;
                     Key::U64(key_counter - 1)
-                };
+                });
                 rows.push(Ok((generated_key, DataRow::Vec(row))));
             }
         } else {
@@ -208,7 +204,6 @@ impl ParquetStorage {
                 data_type: DataType::Map,
                 nullable: true,
                 default: None,
-                unique: false,
                 comment: None,
             }]),
             indexes: vec![],

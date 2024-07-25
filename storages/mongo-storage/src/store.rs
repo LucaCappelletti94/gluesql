@@ -3,7 +3,7 @@ use {
         description::{ColumnDescription, TableDescription},
         error::{MongoStorageError, OptionExt, ResultExt},
         row::{key::KeyIntoBson, value::IntoValue, IntoRow},
-        MongoStorage, PRIMARY_KEY_DESINENCE, UNIQUE_KEY_DESINENCE,
+        MongoStorage,
     },
     async_trait::async_trait,
     futures::{stream, Stream, StreamExt, TryStreamExt},
@@ -18,11 +18,10 @@ use {
     },
     mongodb::{
         bson::{doc, document::ValueAccessError, Document},
-        options::{FindOptions, ListIndexesOptions},
-        IndexModel,
+        options::FindOptions,
     },
     serde_json::from_str,
-    std::{collections::HashMap, future},
+    std::collections::HashMap,
 };
 
 #[async_trait(?Send)]
@@ -62,12 +61,11 @@ impl Store for MongoStorage {
         let projection = doc! {crate::PRIMARY_KEY_SYMBOL: 0};
         let options = FindOptions::builder()
             .projection(projection)
-            .sort(schema.primary_key.map(|pk| {
-                pk.iter()
-                    .fold(Document::new(), |mut document, column_name| {
-                        document.insert(column_name.clone(), 1);
-                        document
-                    })
+            .sort(schema.primary_key_column_names().map(|pk| {
+                pk.fold(Document::new(), |mut document, column_name| {
+                    document.insert(column_name, 1);
+                    document
+                })
             }))
             .build();
 
@@ -97,13 +95,11 @@ impl Store for MongoStorage {
         let schema = self.fetch_schema(table_name).await?;
 
         let primary_key_documnt = schema.as_ref().and_then(|schema| {
-            schema.primary_key.as_ref().map(|primary_key| {
-                primary_key
-                    .iter()
-                    .fold(Document::new(), |mut document, column_name| {
-                        document.insert(column_name.clone(), 1);
-                        document
-                    })
+            schema.primary_key_column_names().map(|pk| {
+                pk.fold(Document::new(), |mut document, column_name| {
+                    document.insert(column_name, 1);
+                    document
+                })
             })
         });
 
@@ -188,31 +184,6 @@ impl MongoStorage {
                 .and_then(|doc| doc.get_document("$jsonSchema"))
                 .map_storage_err()?;
 
-            let collection = self.db.collection::<Document>(collection_name);
-            let options = ListIndexesOptions::builder().build();
-            let cursor = collection.list_indexes(options).await.map_storage_err()?;
-            let reverse_indexes = cursor
-                .into_stream()
-                .map_err(|e| Error::StorageMsg(e.to_string()))
-                .try_filter_map(|IndexModel { keys, options, .. }| {
-                    let index_name = options.and_then(|options| options.name).unwrap_or_default();
-                    let keys = keys.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
-
-                    future::ready(Ok::<_, Error>(Some((index_name, keys))))
-                })
-                .try_collect::<HashMap<String, Vec<String>>>()
-                .await?;
-
-            // We revert the indexes to get the column names first mapping to the index names
-            let indexes = reverse_indexes
-                .into_iter()
-                .flat_map(|(index_name, keys)| {
-                    keys.into_iter().map(move |key| (key, index_name.clone()))
-                })
-                .collect::<HashMap<String, String>>();
-
-            let mut primary_key: Option<Vec<String>> = None;
-
             let column_defs = validator
                 .get_document("properties")
                 .map_storage_err()?
@@ -239,22 +210,6 @@ impl MongoStorage {
                         .and_then(parse_data_type)
                         .and_then(|s| translate_data_type(&s))?;
 
-                    let unique = if let Some(index_name) = indexes.get(column_name) {
-                        if index_name.ends_with(UNIQUE_KEY_DESINENCE) {
-                            true
-                        } else {
-                            if index_name.ends_with(PRIMARY_KEY_DESINENCE) {
-                                match primary_key.as_mut() {
-                                    Some(pk) => pk.push(column_name.to_owned()),
-                                    None => primary_key = Some(vec![column_name.to_owned()]),
-                                }
-                            }
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
                     let column_description = doc.get_str("description");
                     let ColumnDescription { default, comment } = match column_description {
                         Ok(desc) => {
@@ -276,7 +231,6 @@ impl MongoStorage {
                         data_type,
                         nullable,
                         default,
-                        unique,
                         comment,
                     };
 
@@ -292,6 +246,7 @@ impl MongoStorage {
             let table_description = validator.get_str("description").map_storage_err()?;
             let TableDescription {
                 foreign_keys,
+                primary_key,
                 unique_constraints,
                 comment,
             } = from_str::<TableDescription>(table_description).map_storage_err()?;

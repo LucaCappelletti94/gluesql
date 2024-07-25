@@ -78,17 +78,22 @@ pub struct UniqueConstraint {
     /// Optional name for the constraint.
     name: Option<String>,
     /// The fields that are part of the UNIQUE constraint.
-    columns: Vec<String>,
+    columns: Vec<usize>,
 }
 
 impl UniqueConstraint {
     /// Creates a new UNIQUE constraint with the given name and columns.
-    pub fn new(name: Option<String>, columns: Vec<String>) -> Self {
+    pub fn new(name: Option<String>, columns: Vec<usize>) -> Self {
         assert!(
             !columns.is_empty(),
             "A UNIQUE constraint must have at least one column."
         );
         Self { name, columns }
+    }
+
+    /// Creates a new anonimous UNIQUE constraint with the given columns.
+    pub fn new_anonimous(columns: Vec<usize>) -> Self {
+        Self::new(None, columns)
     }
 
     /// Returns the name of the UNIQUE constraint.
@@ -97,17 +102,25 @@ impl UniqueConstraint {
     }
 
     /// Returns the columns that are part of the UNIQUE constraint.
-    pub fn columns(&self) -> &[String] {
+    pub fn column_indices(&self) -> &[usize] {
         &self.columns
     }
-}
 
-impl ToSql for UniqueConstraint {
-    fn to_sql(&self) -> String {
+    /// Returns whether constraint includes the provided index.
+    pub fn includes_column(&self, index: usize) -> bool {
+        self.columns.contains(&index)
+    }
+
+    /// Returns whether it is composed of a single column, i.e. is a single-field UNIQUE constraint.
+    pub fn is_single_field(&self) -> bool {
+        self.columns.len() == 1
+    }
+
+    fn to_sql<S: AsRef<str>>(&self, column_names: &[S]) -> String {
         let columns = self
             .columns
             .iter()
-            .map(|column| format!(r#""{}""#, column))
+            .map(|column| format!(r#""{}""#, column_names[*column].as_ref()))
             .join(", ");
         if let Some(name) = &self.name {
             format!(r#"CONSTRAINT "{}" UNIQUE ({})"#, name, columns)
@@ -123,7 +136,9 @@ pub struct ForeignKey {
     pub referencing_column_name: String,
     pub referenced_table_name: String,
     pub referenced_column_name: String,
+    /// The action to perform when the referenced row is deleted.
     pub on_delete: ReferentialAction,
+    /// The action to perform when the referenced row is updated.
     pub on_update: ReferentialAction,
 }
 
@@ -201,7 +216,7 @@ pub enum Statement {
         source: Option<Box<Query>>,
         engine: Option<String>,
         foreign_keys: Vec<ForeignKey>,
-        primary_key: Option<Vec<String>>,
+        primary_key: Option<Vec<usize>>,
         unique_constraints: Vec<UniqueConstraint>,
         comment: Option<String>,
     },
@@ -334,27 +349,38 @@ impl ToSql for Statement {
             } => {
                 let if_not_exists = if_not_exists.then_some("IF NOT EXISTS");
 
-                let primary_key = primary_key
-                    .as_ref()
-                    .map(|cols| format!("PRIMARY KEY ({})", cols.join(", ")));
+                let primary_key = match (primary_key.as_ref(), columns.as_ref()) {
+                    (Some(indices), Some(columns)) => Some(format!(
+                        "PRIMARY KEY ({})",
+                        indices
+                            .iter()
+                            .copied()
+                            .map(|i| format!(r#""{}""#, columns[i].name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+                    _ => None,
+                };
+
                 let body = match (source, columns) {
                     (Some(query), _) => Some(format!("AS {}", query.to_sql())),
                     (None, None) => None,
                     (None, Some(columns)) => {
-                        let mut body = columns
+                        let column_names = columns
                             .iter()
-                            .map(ToSql::to_sql)
-                            .chain(foreign_keys.iter().map(ToSql::to_sql))
-                            .chain(unique_constraints.iter().map(ToSql::to_sql))
+                            .map(|column| &column.name)
                             .collect::<Vec<_>>();
-
-                        // If we identified earlier that there is a primary key, we add it
-                        // at the end of the CREATE TABLE statement.
-                        if let Some(primary_key) = primary_key {
-                            body.push(primary_key);
-                        }
-
-                        let body = body.join(", ");
+                        let body =
+                            columns
+                                .iter()
+                                .map(ToSql::to_sql)
+                                .chain(foreign_keys.iter().map(ToSql::to_sql))
+                                .chain(unique_constraints.iter().map(|unique_constraint| {
+                                    unique_constraint.to_sql(&column_names)
+                                }))
+                                .chain(primary_key)
+                                .collect::<Vec<_>>()
+                                .join(", ");
 
                         Some(format!("({body})"))
                     }
@@ -699,7 +725,7 @@ mod tests {
     /// Test to evaluate whether the `CREATE TABLE` statement involving UNIQUE constraints can be converted to SQL.
     fn to_sql_create_table_with_unique() {
         assert_eq!(
-            r#"CREATE TABLE "Foo" ("id" INT NOT NULL UNIQUE, "name" TEXT NOT NULL);"#,
+            r#"CREATE TABLE "Foo" ("id" INT NOT NULL, "name" TEXT NOT NULL, UNIQUE ("id"));"#,
             Statement::CreateTable {
                 if_not_exists: false,
                 name: "Foo".into(),
@@ -723,12 +749,12 @@ mod tests {
                 engine: None,
                 foreign_keys: Vec::new(),
                 primary_key: None,
-                unique_constraints: vec![UniqueConstraint::new(None, vec!["id".to_owned()])],
+                unique_constraints: vec![UniqueConstraint::new(None, vec![0])],
                 comment: None,
             }
             .to_sql()
         );
-        
+
         assert_eq!(
             r#"CREATE TABLE "Foo" ("id" INT NOT NULL, "name" TEXT NOT NULL, UNIQUE ("id"));"#,
             Statement::CreateTable {
@@ -754,7 +780,7 @@ mod tests {
                 engine: None,
                 foreign_keys: Vec::new(),
                 primary_key: None,
-                unique_constraints: vec![UniqueConstraint::new(None, vec!["id".to_owned()])],
+                unique_constraints: vec![UniqueConstraint::new(None, vec![0])],
                 comment: None,
             }
             .to_sql()
@@ -788,7 +814,7 @@ mod tests {
                 primary_key: None,
                 unique_constraints: vec![UniqueConstraint::new(
                     Some("unique_id".to_owned()),
-                    vec!["id".to_owned()]
+                    vec![0]
                 )],
                 comment: None,
             }
@@ -821,10 +847,7 @@ mod tests {
                 engine: None,
                 foreign_keys: Vec::new(),
                 primary_key: None,
-                unique_constraints: vec![UniqueConstraint::new(
-                    None,
-                    vec!["id".to_owned(), "name".to_owned()]
-                )],
+                unique_constraints: vec![UniqueConstraint::new(None, vec![0, 1])],
                 comment: None,
             }
             .to_sql()
@@ -857,12 +880,9 @@ mod tests {
                 foreign_keys: Vec::new(),
                 primary_key: None,
                 unique_constraints: vec![
-                    UniqueConstraint::new(None, vec!["id".to_owned()]),
-                    UniqueConstraint::new(None, vec!["name".to_owned()]),
-                    UniqueConstraint::new(
-                        Some("my_unique".to_owned()),
-                        vec!["id".to_owned(), "name".to_owned()]
-                    ),
+                    UniqueConstraint::new(None, vec![0]),
+                    UniqueConstraint::new(None, vec![1]),
+                    UniqueConstraint::new(Some("my_unique".to_owned()), vec![0, 1]),
                 ],
                 comment: None,
             }
@@ -1025,7 +1045,28 @@ mod tests {
                             BigDecimal::from_str("10").unwrap()
                         ))),
                         comment: None,
-                    }
+                    },
+                    unique: false
+                }
+            }
+            .to_sql()
+        );
+
+        assert_eq!(
+            r#"ALTER TABLE "Foo" ADD UNIQUE COLUMN "amount" INT NOT NULL DEFAULT 10;"#,
+            Statement::AlterTable {
+                name: "Foo".into(),
+                operation: AlterTableOperation::AddColumn {
+                    column_def: ColumnDef {
+                        name: "amount".to_owned(),
+                        data_type: DataType::Int,
+                        nullable: false,
+                        default: Some(Expr::Literal(AstLiteral::Number(
+                            BigDecimal::from_str("10").unwrap()
+                        ))),
+                        comment: None,
+                    },
+                    unique: true
                 }
             }
             .to_sql()
@@ -1227,33 +1268,5 @@ mod tests {
             }
             .to_sql()
         )
-    }
-
-    #[test]
-    /// Test whether the UniqueConstraint struct can be converted to SQL.
-    fn to_sql_unique() {
-        assert_eq!(
-            r#"UNIQUE ("id")"#,
-            UniqueConstraint::new(None, vec!["id".to_owned()]).to_sql()
-        );
-
-        assert_eq!(
-            r#"CONSTRAINT "unique_id" UNIQUE ("id")"#,
-            UniqueConstraint::new(Some("unique_id".to_owned()), vec!["id".to_owned()]).to_sql()
-        );
-
-        assert_eq!(
-            r#"UNIQUE ("id", "name")"#,
-            UniqueConstraint::new(None, vec!["id".to_owned(), "name".to_owned()]).to_sql()
-        );
-
-        assert_eq!(
-            r#"CONSTRAINT "unique_id_name" UNIQUE ("id", "name")"#,
-            UniqueConstraint::new(
-                Some("unique_id_name".to_owned()),
-                vec!["id".to_owned(), "name".to_owned()]
-            )
-            .to_sql()
-        );
     }
 }

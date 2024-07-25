@@ -130,6 +130,7 @@ mod tests {
                 default: None,
                 comment: None,
             },
+            false
         ))
         .is_err());
         assert!(block_on(storage.drop_column("Foo", "col", false)).is_err());

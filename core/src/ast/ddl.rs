@@ -7,7 +7,7 @@ use {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AlterTableOperation {
     /// `ADD [ COLUMN ] <column_def>`
-    AddColumn { column_def: ColumnDef },
+    AddColumn { column_def: ColumnDef, unique: bool },
     /// `DROP [ COLUMN ] [ IF EXISTS ] <column_name> [ CASCADE ]`
     DropColumn {
         column_name: String,
@@ -43,8 +43,12 @@ pub struct OperateFunctionArg {
 impl ToSql for AlterTableOperation {
     fn to_sql(&self) -> String {
         match self {
-            AlterTableOperation::AddColumn { column_def } => {
-                format!("ADD COLUMN {}", column_def.to_sql())
+            AlterTableOperation::AddColumn { column_def, unique } => {
+                format!(
+                    "ADD {}COLUMN {}",
+                    if *unique { "UNIQUE " } else { "" },
+                    column_def.to_sql()
+                )
             }
             AlterTableOperation::DropColumn {
                 column_name,
@@ -82,6 +86,7 @@ impl ToSql for ColumnDef {
             let default = default
                 .as_ref()
                 .map(|expr| format!("DEFAULT {}", expr.to_sql()));
+
             let comment = comment
                 .as_ref()
                 .map(|comment| format!("COMMENT '{}'", comment));
@@ -117,7 +122,7 @@ mod tests {
     #[test]
     fn to_sql_column_def() {
         assert_eq!(
-            r#""name" TEXT NOT NULL UNIQUE"#,
+            r#""name" TEXT NOT NULL"#,
             ColumnDef {
                 name: "name".to_owned(),
                 data_type: DataType::Text,
@@ -165,7 +170,7 @@ mod tests {
         );
 
         assert_eq!(
-            r#""accepted" BOOLEAN NOT NULL DEFAULT FALSE UNIQUE"#,
+            r#""accepted" BOOLEAN NOT NULL DEFAULT FALSE"#,
             ColumnDef {
                 name: "accepted".to_owned(),
                 data_type: DataType::Boolean,

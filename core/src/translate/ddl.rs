@@ -18,9 +18,8 @@ pub fn translate_alter_table_operation(
 ) -> Result<AlterTableOperation> {
     match sql_alter_table_operation {
         SqlAlterTableOperation::AddColumn { column_def, .. } => {
-            Ok(AlterTableOperation::AddColumn {
-                column_def: translate_column_def(column_def)?.0,
-            })
+            let (column_def, _, unique) = translate_column_def(column_def)?;
+            Ok(AlterTableOperation::AddColumn { column_def, unique })
         }
         SqlAlterTableOperation::DropColumn {
             column_name,

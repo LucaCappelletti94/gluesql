@@ -53,29 +53,30 @@ impl JsonStorage {
         }
 
         let schema_path = self.schema_path(table_name);
-        let (column_defs, foreign_keys, primary_key, unique_constraints, comment) = match schema_path.exists() {
-            true => {
-                let mut file = File::open(&schema_path).map_storage_err()?;
-                let mut ddl = String::new();
-                file.read_to_string(&mut ddl).map_storage_err()?;
+        let (column_defs, foreign_keys, primary_key, unique_constraints, comment) =
+            match schema_path.exists() {
+                true => {
+                    let mut file = File::open(&schema_path).map_storage_err()?;
+                    let mut ddl = String::new();
+                    file.read_to_string(&mut ddl).map_storage_err()?;
 
-                let schema = Schema::from_ddl(&ddl)?;
-                if schema.table_name != table_name {
-                    return Err(Error::StorageMsg(
-                        JsonStorageError::TableNameDoesNotMatchWithFile.to_string(),
-                    ));
+                    let schema = Schema::from_ddl(&ddl)?;
+                    if schema.table_name != table_name {
+                        return Err(Error::StorageMsg(
+                            JsonStorageError::TableNameDoesNotMatchWithFile.to_string(),
+                        ));
+                    }
+
+                    (
+                        schema.column_defs,
+                        schema.foreign_keys,
+                        schema.primary_key,
+                        schema.unique_constraints,
+                        schema.comment,
+                    )
                 }
-
-                (
-                    schema.column_defs,
-                    schema.foreign_keys,
-schema.primary_key,
-schema.unique_constraints,
-                    schema.comment,
-                )
-            }
-            false => (None, Vec::new(), None, Vec::new(), None),
-        };
+                false => (None, Vec::new(), None, Vec::new(), None),
+            };
 
         Ok(Some(Schema {
             table_name: table_name.to_owned(),
@@ -156,8 +157,6 @@ schema.unique_constraints,
             }
         };
 
-        let primary_key_indices = schema.get_primary_key_column_indices();
-
         let schema2 = schema.clone();
         let rows = jsons.enumerate().map(move |(index, json)| -> Result<_> {
             let json = json?;
@@ -189,11 +188,9 @@ schema.unique_constraints,
                 values.push(value);
             }
 
-            let key = if let Some(primary_key_indices) = primary_key_indices.as_ref() {
-                gluesql_core::executor::get_primary_key_from_row(&values, primary_key_indices)?
-            } else {
-                get_index_key()?
-            };
+            let key = schema2
+                .get_primary_key(&values)
+                .or_else(|_| get_index_key())?;
             let row = DataRow::Vec(values);
 
             Ok((key, row))
